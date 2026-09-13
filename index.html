@@ -264,6 +264,7 @@ const state = {
   bins: [],        // shelf bins / baskets
   students: [],    // roster
   loans: [],       // OPEN loans only (returned_at is null)
+  history: [],     // finished checkouts, newest first
   tab: 'scan',
   authMode: 'in',
 };
@@ -346,6 +347,15 @@ function booksInBin(binId) {
 
 function openLoanForBook(bookId) { return state.loans.find(l => l.book_id === bookId); }
 function openLoansForStudent(sid) { return state.loans.filter(l => l.student_id === sid); }
+function historyForStudent(sid) { return state.history.filter(l => l.student_id === sid); }
+function timesBorrowed(bookId) {
+  return state.history.filter(l => l.book_id === bookId).length + (openLoanForBook(bookId) ? 1 : 0);
+}
+function daysKept(loan) {
+  const out = new Date(loan.checked_out_at), back = new Date(loan.returned_at);
+  const n = Math.max(1, Math.round((back - out) / 86400000));
+  return `${n} day${n === 1 ? '' : 's'}`;
+}
 function studentById(id) { return state.students.find(s => s.id === id); }
 function bookById(id) { return state.books.find(b => b.id === id); }
 function overdueLoans() {
@@ -359,7 +369,7 @@ async function loadAll() {
     db.from('teachers').select('*').eq('id', state.user.id).maybeSingle(),
     db.from('students').select('*').order('last_name').order('first_name'),
     db.from('books').select('*').order('title'),
-    db.from('loans').select('*').is('returned_at', null),
+    db.from('loans').select('*').order('checked_out_at', { ascending: false }),
     db.from('bins').select('*').order('sort_order').order('name'),
   ]);
 
@@ -376,21 +386,27 @@ async function loadAll() {
 
   state.students = s.data || [];
   state.books    = b.data || [];
-  state.loans    = l.data || [];
   state.bins     = n.data || [];
+  splitLoans(l.data || []);
+}
+
+/* One fetch, two lists: what is out now, and everything already returned */
+function splitLoans(all) {
+  state.loans   = all.filter(l => !l.returned_at);
+  state.history = all.filter(l =>  l.returned_at);
 }
 
 async function refresh() {
   const [s, b, l, n] = await Promise.all([
     db.from('students').select('*').order('last_name').order('first_name'),
     db.from('books').select('*').order('title'),
-    db.from('loans').select('*').is('returned_at', null),
+    db.from('loans').select('*').order('checked_out_at', { ascending: false }),
     db.from('bins').select('*').order('sort_order').order('name'),
   ]);
   state.students = s.data || [];
   state.books    = b.data || [];
-  state.loans    = l.data || [];
   state.bins     = n.data || [];
+  splitLoans(l.data || []);
   render();
 }
 
@@ -789,6 +805,14 @@ function showBookSheet(bookId) {
         ${b.reading_level ? `<div class="muted">Level ${esc(b.reading_level)}</div>` : ''}
         ${b.isbn ? `<div class="muted" style="font-size:12px">ISBN ${esc(b.isbn)}</div>` : ''}
         ${binChip(b.bin_id) ? `<div style="margin-top:6px">${binChip(b.bin_id)}</div>` : ''}
+        ${(() => {
+          const n = timesBorrowed(bookId);
+          if (!n) return `<div class="muted" style="margin-top:6px">Not borrowed yet</div>`;
+          const last = state.history.filter(l => l.book_id === bookId)[0];
+          const who  = last ? studentById(last.student_id) : null;
+          return `<div class="muted" style="margin-top:6px">Borrowed ${n} time${n === 1 ? '' : 's'}${
+            who ? ` &middot; last back from ${esc(who.first_name)} ${fmtDate(last.returned_at)}` : ''}</div>`;
+        })()}
       </div>
     </div>
     ${state.bins.length ? `<label class="field"><span>Shelf spot</span>
@@ -863,9 +887,15 @@ function showStudentPicker(bookId) {
 }
 
 /* ---------------- student sheets ---------------- */
-function showStudentSheet(id) {
-  const s = studentById(id);
+const HISTORY_PAGE = 20;
+let historyShown = HISTORY_PAGE;
+
+function showStudentSheet(id, keepPage) {
+  if (!keepPage) historyShown = HISTORY_PAGE;
+
+  const s     = studentById(id);
   const loans = openLoansForStudent(id);
+  const past  = historyForStudent(id);
 
   const rows = loans.length ? loans.map(l => {
     const b = bookById(l.book_id) || { title: 'Unknown book' };
@@ -879,15 +909,44 @@ function showStudentSheet(id) {
       </div></button>`;
   }).join('') : `<p class="muted">Nothing checked out right now.</p>`;
 
+  const shown = past.slice(0, historyShown);
+  const pastRows = past.length ? shown.map(l => {
+    const b = bookById(l.book_id) || { title: 'Unknown book' };
+    return `<button class="item" onclick="closeSheet(); showBookSheet('${l.book_id}')">
+      ${coverHTML(b)}
+      <div class="grow">
+        <div class="ttl">${esc(b.title)}</div>
+        <div class="sub">${esc(b.author || '')}</div>
+        <div class="meta muted">Returned ${fmtDate(l.returned_at)} &middot; kept ${daysKept(l)}</div>
+      </div></button>`;
+  }).join('') : `<p class="muted">No finished books yet. They will show up here as books come back.</p>`;
+
   openSheet(`
     <h2>${esc(fullName(s))}</h2>
-    <p class="muted" style="margin:2px 0 16px">${loans.length} of ${state.teacher.max_books} allowed out</p>
+    <p class="muted" style="margin:2px 0 16px">
+      ${loans.length} of ${state.teacher.max_books} out now &middot;
+      <b>${past.length} finished</b>
+    </p>
+
+    <div class="sect-title" style="margin-top:0">Out now</div>
     <div class="list">${rows}</div>
-    <p class="center" style="margin-top:20px">
+
+    <div class="sect-title">Books they have finished${past.length ? ` (${past.length})` : ''}</div>
+    <div class="list">${pastRows}</div>
+    ${past.length > shown.length
+      ? `<button class="btn ghost sm" style="width:100%;margin-top:10px" id="moreHist">Show ${Math.min(HISTORY_PAGE, past.length - shown.length)} more</button>`
+      : ''}
+
+    <p class="center" style="margin-top:22px">
       <button class="muted" style="text-decoration:underline" onclick="deleteStudent('${id}')">Remove from class list</button>
     </p>
     <button class="btn ghost" style="margin-top:14px" onclick="closeSheet()">Close</button>
   `);
+
+  $('#moreHist')?.addEventListener('click', () => {
+    historyShown += HISTORY_PAGE;
+    showStudentSheet(id, true);
+  });
 }
 
 function showAddStudents() {
@@ -1134,6 +1193,7 @@ function renderStudents() {
 
   const rows = state.students.map(s => {
     const loans = openLoansForStudent(s.id);
+    const done  = historyForStudent(s.id).length;
     const late  = loans.some(l => new Date(l.due_at) < startOfToday());
     return `<button class="item" onclick="showStudentSheet('${s.id}')">
       <div class="cover ph" style="width:38px;flex-basis:38px;height:38px;border-radius:50%;font-size:16px">${esc(s.first_name[0])}</div>
@@ -1143,6 +1203,7 @@ function renderStudents() {
           <span class="pill ${late ? 'late' : loans.length ? 'out' : 'in'}">
             ${loans.length ? `${loans.length} book${loans.length===1?'':'s'} out${late ? ' · overdue' : ''}` : 'Nothing out'}
           </span>
+          <span class="muted"> ${done} finished</span>
         </div>
       </div></button>`;
   }).join('');
@@ -1210,6 +1271,7 @@ function renderSettings() {
     <div class="card pad">
       <div class="muted">${state.books.length} books &middot; ${state.students.length} students &middot; ${state.loans.length} checked out</div>
       <button class="btn ghost sm" style="width:100%;margin-top:12px" id="setExport">Download a backup (CSV)</button>
+      <button class="btn ghost sm" style="width:100%;margin-top:8px" id="setExportLog">Download the checkout log (CSV)</button>
     </div>
 
     <div class="sect-title">Account</div>
@@ -1217,7 +1279,7 @@ function renderSettings() {
       <div class="muted" style="margin-bottom:12px">Signed in as ${esc(state.user.email)}</div>
       <button class="btn ghost" onclick="signOut()">Sign out</button>
     </div>
-    <p class="muted center" style="margin-top:22px;font-size:12px">Class Scanner &middot; v1.2</p>
+    <p class="muted center" style="margin-top:22px;font-size:12px">Class Scanner &middot; v1.3</p>
   `;
 }
 
@@ -1232,11 +1294,36 @@ function exportCSV() {
             l ? 'Checked out' : 'On shelf', st ? fullName(st) : '',
             l ? new Date(l.due_at).toLocaleDateString() : ''];
   });
+  downloadCSV('classroom-library.csv', head, rows);
+}
+
+/* Every checkout ever, finished and current */
+function exportHistoryCSV() {
+  const head = ['Student','Book','Author','Checked out','Due','Returned','Days kept','Status'];
+  const all  = [...state.loans, ...state.history]
+    .sort((a, b) => new Date(b.checked_out_at) - new Date(a.checked_out_at));
+
+  if (!all.length) return toast('Nothing to export yet', 'bad');
+
+  const rows = all.map(l => {
+    const st = studentById(l.student_id);
+    const b  = bookById(l.book_id) || { title: 'Unknown book', author: '' };
+    const d  = ms => ms ? new Date(ms).toLocaleDateString() : '';
+    return [st ? fullName(st) : '', b.title, b.author || '',
+            d(l.checked_out_at), d(l.due_at), d(l.returned_at),
+            l.returned_at ? daysKept(l).replace(/ days?$/, '') : '',
+            l.returned_at ? 'Returned' : 'Out now'];
+  });
+
+  downloadCSV('checkout-log.csv', head, rows);
+}
+
+function downloadCSV(name, head, rows) {
   const csv = [head, ...rows]
     .map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n');
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
-  a.download = 'classroom-library.csv';
+  a.download = name;
   a.click();
 }
 
@@ -1293,6 +1380,7 @@ function render() {
       max_books: +$('#setMax').value,
     }));
     $('#setExport').addEventListener('click', exportCSV);
+    $('#setExportLog').addEventListener('click', exportHistoryCSV);
   }
 }
 
