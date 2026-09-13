@@ -177,6 +177,16 @@ textarea{min-height:130px; resize:vertical; line-height:1.5}
 }
 .empty{text-align:center; padding:40px 20px; color:var(--ink-soft)}
 .empty strong{display:block; font-family:var(--font); font-size:19px; color:var(--ink); margin-bottom:6px}
+.toggle{
+  width:52px;height:31px;border-radius:99px;background:#D9CFBC;position:relative;
+  flex:0 0 52px;transition:background .18s;
+}
+.toggle.on{background:var(--green)}
+.toggle span{
+  position:absolute;top:3px;left:3px;width:25px;height:25px;border-radius:50%;
+  background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.25);transition:transform .18s;
+}
+.toggle.on span{transform:translateX(21px)}
 .spinner{
   width:20px;height:20px;border:2.5px solid rgba(255,255,255,.35);border-top-color:#fff;
   border-radius:50%;animation:spin .7s linear infinite
@@ -288,7 +298,65 @@ function clearToast() {
   const t = $('#toast');
   if (t) t.className = '';
 }
-function buzz(ms = 40) { try { navigator.vibrate && navigator.vibrate(ms); } catch (e) {} }
+/* ---------------- sound ----------------
+   iPhone Safari has no vibration, so a tone is the only feedback that reaches
+   the teacher's hand. Web Audio needs a user gesture before it will make noise,
+   so the first tap anywhere in the app wakes it up. */
+let audioCtx = null;
+let soundOn  = true;
+try { soundOn = localStorage.getItem('cs_sound') !== 'off'; } catch (e) {}
+
+function unlockAudio() {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    if (!audioCtx) audioCtx = new AC();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  } catch (e) {}
+}
+document.addEventListener('touchstart', unlockAudio, { passive: true });
+document.addEventListener('click', unlockAudio, { passive: true });
+
+const TONES = {
+  read:   [[1046.5, 0, 0.07]],                              // barcode caught — a short tick
+  added:  [[659.3, 0, 0.10], [880.0, 0.09, 0.16]],          // rising — it is in the library
+  out:    [[587.3, 0, 0.10], [784.0, 0.09, 0.10], [1046.5, 0.18, 0.20]],  // three rising — off it goes
+  back:   [[880.0, 0, 0.10], [587.3, 0.10, 0.22]],          // falling — home again
+  error:  [[233.1, 0, 0.16], [196.0, 0.15, 0.28]],          // low double — something is wrong
+};
+
+function play(kind) {
+  if (!soundOn) return;
+  unlockAudio();
+  if (!audioCtx) return;
+  const notes = TONES[kind];
+  if (!notes) return;
+  const now = audioCtx.currentTime;
+  notes.forEach(([freq, at, len]) => {
+    const osc  = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = kind === 'error' ? 'triangle' : 'sine';
+    osc.frequency.setValueAtTime(freq, now + at);
+    gain.gain.setValueAtTime(0.0001, now + at);
+    gain.gain.exponentialRampToValueAtTime(kind === 'error' ? 0.22 : 0.30, now + at + 0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + at + len);
+    osc.connect(gain); gain.connect(audioCtx.destination);
+    osc.start(now + at);
+    osc.stop(now + at + len + 0.02);
+  });
+}
+
+/* Sound plus vibration — whichever the phone actually supports */
+function buzz(ms = 40, tone) {
+  try { navigator.vibrate && navigator.vibrate(ms); } catch (e) {}
+  if (tone) play(tone);
+}
+
+function setSound(on) {
+  soundOn = on;
+  try { localStorage.setItem('cs_sound', on ? 'on' : 'off'); } catch (e) {}
+  if (on) play('added');
+}
 
 function fullName(s) { return (s.first_name + ' ' + (s.last_name || '')).trim(); }
 
@@ -514,6 +582,7 @@ async function checkOut(bookId, studentId) {
 
   if (error) {
     const m = error.message || '';
+    play('error');
     if (m.includes('CHECKOUT_LIMIT_REACHED'))
       toast(`That student already has ${state.teacher.max_books} book${state.teacher.max_books===1?'':'s'} out`, 'bad');
     else if (m.includes('loans_one_open_per_book'))
@@ -523,7 +592,7 @@ async function checkOut(bookId, studentId) {
   }
 
   const st = studentById(studentId), bk = bookById(bookId);
-  buzz(50);
+  buzz(50, 'out');
   toast(`${bk.title} → ${st.first_name}, back ${fmtDate(due)}`, 'good');
   await refresh();
   return true;
@@ -534,8 +603,8 @@ async function checkIn(bookId) {
     .update({ returned_at: new Date().toISOString() })
     .eq('book_id', bookId).is('returned_at', null);
 
-  if (error) { toast(error.message, 'bad'); return false; }
-  buzz(50);
+  if (error) { play('error'); toast(error.message, 'bad'); return false; }
+  buzz(50, 'back');
   const book = bookById(bookId);
   await refresh();
   showPutBack(book);
@@ -779,13 +848,13 @@ function onScanned(text) {
   const now = Date.now();
   if (text === lastCode && now - lastCodeAt < 3000) return;  // ignore rapid repeats
   lastCode = text; lastCodeAt = now;
-  buzz(60);
+  buzz(60, 'read');
   handleCode(cleanISBN(text));
 }
 
 /* What happens once we have an ISBN — scanned or typed */
 async function handleCode(isbn) {
-  if (!isbn || isbn.length < 8) return toast('That barcode is not a book ISBN', 'bad');
+  if (!isbn || isbn.length < 8) { play('error'); return toast('That barcode is not a book ISBN', 'bad'); }
 
   const alt = isbn.length === 10 ? isbn10to13(isbn) : null;
   const book = state.books.find(b => b.isbn === isbn || (alt && b.isbn === alt));
@@ -831,7 +900,7 @@ async function handleCode(isbn) {
       bin_id: ($('#nbBin') ? $('#nbBin').value : '') || null,
       cover_url: info.cover || null,
     });
-    if (created) { toast('Added to your library', 'good'); showBookSheet(created.id); }
+    if (created) { buzz(50, 'added'); toast('Added to your library', 'good'); showBookSheet(created.id); }
   });
 }
 
@@ -1331,6 +1400,21 @@ function renderSettings() {
       <button class="btn" id="setSave">Save</button>
     </div>
 
+    <div class="sect-title">Sound</div>
+    <div class="card pad">
+      <div class="row" style="justify-content:space-between;gap:12px">
+        <div class="grow">
+          <strong style="font-size:15px">Confirmation sounds</strong>
+          <div class="muted">A tone when a book is scanned, added, checked out, or brought back.</div>
+        </div>
+        <button class="toggle ${soundOn ? 'on' : ''}" id="setSound" aria-label="Confirmation sounds"><span></span></button>
+      </div>
+      <button class="btn ghost sm" style="width:100%;margin-top:12px" id="setSoundTest">Hear the sounds</button>
+      <div class="muted" style="margin-top:10px;font-size:12px">
+        Set per phone. Turn it off for quiet reading time — everything still works, you just will not hear it.
+      </div>
+    </div>
+
     <div class="sect-title">Shelf spots <span style="text-transform:none;letter-spacing:0;font-weight:500">(optional)</span></div>
     <div class="card pad">
       <div class="muted" style="margin-bottom:12px">
@@ -1354,7 +1438,7 @@ function renderSettings() {
       <div class="muted" style="margin-bottom:12px">Signed in as ${esc(state.user.email)}</div>
       <button class="btn ghost" onclick="signOut()">Sign out</button>
     </div>
-    <p class="muted center" style="margin-top:22px;font-size:12px">Class Scanner &middot; v1.4</p>
+    <p class="muted center" style="margin-top:22px;font-size:12px">Class Scanner &middot; v1.5</p>
   `;
 }
 
@@ -1456,6 +1540,24 @@ function render() {
     }));
     $('#setExport').addEventListener('click', exportCSV);
     $('#setExportLog').addEventListener('click', exportHistoryCSV);
+
+    $('#setSound').addEventListener('click', e => {
+      const on = !e.currentTarget.classList.contains('on');
+      e.currentTarget.classList.toggle('on', on);
+      setSound(on);
+      toast(on ? 'Sounds on' : 'Sounds off');
+    });
+
+    $('#setSoundTest').addEventListener('click', async () => {
+      if (!soundOn) return toast('Turn sounds on first', 'bad');
+      const steps = [['read','Barcode read'], ['added','Added to the library'],
+                     ['out','Checked out'], ['back','Brought back'], ['error','Something is wrong']];
+      for (const [tone, label] of steps) {
+        toast(label);
+        play(tone);
+        await new Promise(r => setTimeout(r, 900));
+      }
+    });
   }
 }
 
