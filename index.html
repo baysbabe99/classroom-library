@@ -331,6 +331,7 @@ const BIN_COLORS = {
 function binById(id) { return state.bins.find(b => b.id === id); }
 function binColor(bin) { return BIN_COLORS[bin && bin.color] || BIN_COLORS.green; }
 function binChip(binId) {
+  if (!state.bins.length) return '';           // feature is off until a teacher names a spot
   const bin = binById(binId);
   if (!bin) return `<span class="binchip"><span class="dot" style="background:#C9BFAC"></span>Not sorted</span>`;
   return `<span class="binchip"><span class="dot" style="background:${binColor(bin)}"></span>${esc(bin.name)}</span>`;
@@ -527,7 +528,8 @@ async function checkIn(bookId) {
 
 /* After a check-in: tell the teacher (or the student) exactly where it goes */
 function showPutBack(book) {
-  const bin = binById(book.bin_id);
+  const bin      = binById(book.bin_id);
+  const usesBins = state.bins.length > 0;
   openSheet(`
     <div class="putback">
       <div class="pill in">Checked in</div>
@@ -536,11 +538,11 @@ function showPutBack(book) {
         ${bin ? esc(bin.name) : 'Back on the shelf'}
       </div>
       <p class="muted" style="margin:4px 0 0">${esc(book.title)}</p>
-      ${bin ? '' : `<p class="muted" style="margin-top:10px">No bin set for this one yet.</p>`}
+      ${usesBins && !bin ? `<p class="muted" style="margin-top:10px">No shelf spot set for this one yet.</p>` : ''}
     </div>
     <div class="stack" style="margin-top:18px">
       <button class="btn" onclick="closeSheet()">Done</button>
-      ${bin ? '' : `<button class="btn ghost" onclick="closeSheet(); showBookSheet('${book.id}')">Give it a bin</button>`}
+      ${usesBins && !bin ? `<button class="btn ghost" onclick="closeSheet(); showBookSheet('${book.id}')">Give it a spot</button>` : ''}
     </div>
   `);
 }
@@ -595,10 +597,10 @@ async function addBins(names) {
     sort_order: start + i,
   })).filter(r => r.name);
 
-  if (!rows.length) return toast('No bin names found', 'bad');
+  if (!rows.length) return toast('No names found', 'bad');
   const { error } = await db.from('bins').insert(rows);
   if (error) return toast(error.message, 'bad');
-  toast(`Added ${rows.length} bin${rows.length === 1 ? '' : 's'}`, 'good');
+  toast(`Added ${rows.length} spot${rows.length === 1 ? '' : 's'}`, 'good');
   closeSheet();
   await refresh();
 }
@@ -614,7 +616,7 @@ async function saveBin(id, fields) {
 async function deleteBin(id) {
   const { error } = await db.from('bins').delete().eq('id', id);
   if (error) return toast(error.message, 'bad');
-  toast('Bin removed — its books are now unsorted');
+  toast('Spot removed — its books are now unsorted');
   closeSheet();
   await refresh();
 }
@@ -720,10 +722,8 @@ async function handleCode(isbn) {
     </div>
     <label class="field"><span>Reading level (optional)</span>
       <input type="text" id="nbLevel" placeholder="e.g. Y, 4.2, Realistic Fiction"></label>
-    <label class="field"><span>Which bin does it live in?</span>
-      <select id="nbBin">${binOptions(null)}</select>
-      ${state.bins.length ? '' : '<span class="muted" style="display:block;margin-top:6px">No bins yet — set them up under Setup.</span>'}
-    </label>
+    ${state.bins.length ? `<label class="field"><span>Where does it go on the shelf?</span>
+      <select id="nbBin">${binOptions(null)}</select></label>` : ''}
     <div class="stack">
       <button class="btn" id="nbSave">Add to library</button>
       <button class="btn ghost" onclick="closeSheet()">Cancel</button>
@@ -738,7 +738,7 @@ async function handleCode(isbn) {
       title,
       author: $('#nbAuthor').value.trim(),
       reading_level: $('#nbLevel').value.trim() || null,
-      bin_id: $('#nbBin').value || null,
+      bin_id: ($('#nbBin') ? $('#nbBin').value : '') || null,
       cover_url: info.cover || null,
     });
     if (created) { toast('Added to your library', 'good'); showBookSheet(created.id); }
@@ -788,18 +788,18 @@ function showBookSheet(bookId) {
         <div class="muted">${esc(b.author || 'Unknown author')}</div>
         ${b.reading_level ? `<div class="muted">Level ${esc(b.reading_level)}</div>` : ''}
         ${b.isbn ? `<div class="muted" style="font-size:12px">ISBN ${esc(b.isbn)}</div>` : ''}
-        <div style="margin-top:6px">${binChip(b.bin_id)}</div>
+        ${binChip(b.bin_id) ? `<div style="margin-top:6px">${binChip(b.bin_id)}</div>` : ''}
       </div>
     </div>
-    <label class="field"><span>Shelf bin</span>
-      <select id="bkBin">${binOptions(b.bin_id)}</select></label>
+    ${state.bins.length ? `<label class="field"><span>Shelf spot</span>
+      <select id="bkBin">${binOptions(b.bin_id)}</select></label>` : ''}
     ${body}
     <p class="center" style="margin-top:18px">
       <button class="muted" style="text-decoration:underline" id="bkDel">Remove this book from the library</button>
     </p>
   `);
 
-  $('#bkBin').addEventListener('change', e => setBookBin(bookId, e.target.value));
+  $('#bkBin')?.addEventListener('change', e => setBookBin(bookId, e.target.value));
   const inBtn = $('#bkIn'), outBtn = $('#bkOut');
   if (inBtn)  inBtn.addEventListener('click', async () => { closeSheet(); await checkIn(bookId); });
   if (outBtn) outBtn.addEventListener('click', () => showStudentPicker(bookId));
@@ -908,9 +908,9 @@ function showAddStudents() {
 
 function showAddBins() {
   openSheet(`
-    <h2>Name your bins</h2>
-    <p class="muted" style="margin:4px 0 14px">One per line — whatever is written on the basket labels. Colors are assigned for you and can be changed.</p>
-    <textarea id="binBox" placeholder="Graphic Novels&#10;Realistic Fiction&#10;Sports&#10;Bin 4"></textarea>
+    <h2>Name your shelf spots</h2>
+    <p class="muted" style="margin:4px 0 14px">One per line — bins, baskets, or shelf sections, however you say it. Colors are assigned for you and can be changed.</p>
+    <textarea id="binBox" placeholder="Graphic Novels&#10;Realistic Fiction&#10;Top shelf&#10;Bin 4"></textarea>
     <div class="stack" style="margin-top:14px">
       <button class="btn" id="binSave">Add them</button>
       <button class="btn ghost" onclick="closeSheet()">Cancel</button>
@@ -932,11 +932,11 @@ function showBinsList() {
   }).join('') : `<p class="muted">No bins yet.</p>`;
 
   openSheet(`
-    <h2>Bins &amp; baskets</h2>
+    <h2>Shelf spots</h2>
     <p class="muted" style="margin:4px 0 14px">Where each book lives when it is not in a kid's backpack.</p>
     <div class="list">${rows}</div>
     <div class="stack" style="margin-top:16px">
-      <button class="btn" onclick="showAddBins()">Add bins</button>
+      <button class="btn" onclick="showAddBins()">Add spots</button>
       <button class="btn ghost" onclick="closeSheet()">Close</button>
     </div>
   `);
@@ -971,10 +971,10 @@ function showBinEdit(id) {
   $('#beSave').addEventListener('click', () =>
     saveBin(id, { name: $('#beName').value.trim() || bin.name, color }));
   $('#beDel').addEventListener('click', () => openSheet(`
-    <h2>Delete this bin?</h2>
+    <h2>Delete this spot?</h2>
     <p class="muted" style="margin:4px 0 18px">${n ? `The ${n} book${n === 1 ? '' : 's'} in it will be marked "Not sorted."` : 'It is empty.'} No books are deleted.</p>
     <div class="stack">
-      <button class="btn red" onclick="deleteBin('${id}')">Yes, delete the bin</button>
+      <button class="btn red" onclick="deleteBin('${id}')">Yes, delete the spot</button>
       <button class="btn ghost" onclick="showBinEdit('${id}')">Keep it</button>
     </div>`));
 }
@@ -1048,12 +1048,14 @@ function bookRow(b) {
 function segHTML() {
   return `<div class="seg">
     <button data-mode="all"  class="${booksMode === 'all'  ? 'on' : ''}">All books</button>
-    <button data-mode="bins" class="${booksMode === 'bins' ? 'on' : ''}">By bin</button>
+    <button data-mode="bins" class="${booksMode === 'bins' ? 'on' : ''}">By spot</button>
   </div>`;
 }
 
 function renderBooks() {
-  if (booksMode === 'bins') return segHTML() + renderByBin();
+  if (!state.bins.length) booksMode = 'all';   // nothing to browse by
+  const seg = state.bins.length ? segHTML() : '';
+  if (booksMode === 'bins') return seg + renderByBin();
 
   const q = bookQuery.toLowerCase();
   let list = state.books.filter(b =>
@@ -1061,7 +1063,7 @@ function renderBooks() {
   if (bookFilter === 'in')  list = list.filter(b => !openLoanForBook(b.id));
   if (bookFilter === 'out') list = list.filter(b =>  openLoanForBook(b.id));
 
-  return segHTML() + `
+  return seg + `
     <input type="text" id="bookSearch" placeholder="Search title or author" value="${esc(bookQuery)}">
     <div class="row" style="margin:12px 0 14px;gap:8px">
       ${['all','in','out'].map(f => `
@@ -1081,7 +1083,7 @@ function renderByBin() {
     const books = booksInBin(openBin);
     const out   = books.filter(b => openLoanForBook(b.id)).length;
     return `
-      <button class="btn ghost sm" id="binBack" style="margin-bottom:14px">&larr; All bins</button>
+      <button class="btn ghost sm" id="binBack" style="margin-bottom:14px">&larr; All spots</button>
       <div class="card pad" style="margin-bottom:14px">
         <div class="row">
           <span class="dot" style="width:16px;height:16px;flex-basis:16px;background:${bin ? binColor(bin) : '#C9BFAC'}"></span>
@@ -1091,15 +1093,15 @@ function renderByBin() {
       </div>
       ${books.length
         ? `<div class="list">${books.map(bookRow).join('')}</div>`
-        : `<div class="empty"><strong>This bin is empty</strong>Scan a book and pick this bin.</div>`}`;
+        : `<div class="empty"><strong>Nothing here yet</strong>Scan a book and pick this spot.</div>`}`;
   }
 
   if (!state.bins.length) return `
     <div class="empty">
-      <strong>No bins yet</strong>
-      Name your baskets or tubs once, then every book knows where it goes back.
+      <strong>No shelf spots yet</strong>
+      Name your bins or sections once, then every book knows where it goes back.
     </div>
-    <button class="btn" onclick="showAddBins()">Set up my bins</button>`;
+    <button class="btn" onclick="showAddBins()">Set up shelf spots</button>`;
 
   const rows = state.bins.map(bin => {
     const books = booksInBin(bin.id);
@@ -1116,10 +1118,10 @@ function renderByBin() {
   const looseRow = loose ? `<button class="item" data-bin="__none">
       <span class="dot" style="width:16px;height:16px;flex-basis:16px;margin-top:5px;background:#C9BFAC"></span>
       <div class="grow"><div class="ttl">Not sorted</div>
-      <div class="sub">${loose} book${loose === 1 ? '' : 's'} with no bin</div></div></button>` : '';
+      <div class="sub">${loose} book${loose === 1 ? '' : 's'} with no spot</div></div></button>` : '';
 
   return `<div class="list">${rows}${looseRow}</div>
-    <button class="btn ghost" style="margin-top:16px" onclick="showAddBins()">Add more bins</button>`;
+    <button class="btn ghost" style="margin-top:16px" onclick="showAddBins()">Add more spots</button>`;
 }
 
 function renderStudents() {
@@ -1193,15 +1195,15 @@ function renderSettings() {
       <button class="btn" id="setSave">Save</button>
     </div>
 
-    <div class="sect-title">Shelf bins</div>
+    <div class="sect-title">Shelf spots <span style="text-transform:none;letter-spacing:0;font-weight:500">(optional)</span></div>
     <div class="card pad">
       <div class="muted" style="margin-bottom:12px">
         ${state.bins.length
-          ? `${state.bins.length} bin${state.bins.length === 1 ? '' : 's'} set up${booksInBin(null).length ? ` · ${booksInBin(null).length} book${booksInBin(null).length === 1 ? '' : 's'} still unsorted` : ''}`
-          : 'None yet. Name your baskets once and every check-in tells you where the book goes back.'}
+          ? `${state.bins.length} spot${state.bins.length === 1 ? '' : 's'}${booksInBin(null).length ? ` · ${booksInBin(null).length} book${booksInBin(null).length === 1 ? '' : 's'} with no spot yet` : ''}`
+          : 'If your books live in labeled bins, baskets, or shelf sections, name them here and every check-in will tell you exactly where the book goes back. Skip this if your books just sit on a shelf — everything else works the same.'}
       </div>
       <button class="btn ${state.bins.length ? 'ghost' : ''}" onclick="${state.bins.length ? 'showBinsList()' : 'showAddBins()'}">
-        ${state.bins.length ? 'Manage bins' : 'Set up my bins'}</button>
+        ${state.bins.length ? 'Manage shelf spots' : 'Set up shelf spots'}</button>
     </div>
 
     <div class="sect-title">Your library</div>
@@ -1215,12 +1217,12 @@ function renderSettings() {
       <div class="muted" style="margin-bottom:12px">Signed in as ${esc(state.user.email)}</div>
       <button class="btn ghost" onclick="signOut()">Sign out</button>
     </div>
-    <p class="muted center" style="margin-top:22px;font-size:12px">Class Scanner &middot; v1.1</p>
+    <p class="muted center" style="margin-top:22px;font-size:12px">Class Scanner &middot; v1.2</p>
   `;
 }
 
 function exportCSV() {
-  const head = ['Title','Author','ISBN','Level','Bin','Status','Student','Due'];
+  const head = ['Title','Author','ISBN','Level','Shelf spot','Status','Student','Due'];
   const rows = state.books.map(b => {
     const l   = openLoanForBook(b.id);
     const st  = l ? studentById(l.student_id) : null;
