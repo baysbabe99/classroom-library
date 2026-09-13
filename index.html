@@ -657,37 +657,110 @@ async function saveSettings(fields) {
 /* ---------------- the scan flow ---------------- */
 let scanner = null, scanning = false, lastCode = '', lastCodeAt = 0;
 
+function isStandalone() {
+  return window.navigator.standalone === true ||
+         (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+}
+
+function setScanStatus(html, kind) {
+  const el = $('#scanStatus');
+  if (!el) return;
+  if (!html) { el.hidden = true; el.innerHTML = ''; return; }
+  el.hidden = false;
+  el.style.borderColor = kind === 'bad' ? 'var(--red)' : 'var(--line)';
+  el.innerHTML = html;
+}
+
+/* Everything that can go wrong here gets SAID, never swallowed. */
+function scanFailed(err) {
+  const name = (err && (err.name || err.message)) || 'Unknown problem';
+  const box  = $('#reader');
+  if (box) box.hidden = true;
+  const idle = $('#scanIdle'); if (idle) idle.hidden = false;
+  const stop = $('#scanStop'); if (stop) stop.hidden = true;
+  scanning = false; scanner = null;
+
+  let advice;
+  if (/NotAllowedError|Permission|denied/i.test(name)) {
+    advice = isStandalone()
+      ? `Your iPhone will not give the camera to an app opened from the home screen until you allow it once in Safari. <b>Open the link in Safari</b>, tap Open the camera there and tap Allow, then come back to this icon.`
+      : `Camera access was blocked. On iPhone: tap the <b>aA</b> button in the address bar &rarr; Website Settings &rarr; Camera &rarr; Allow. Then reload.`;
+  } else if (/NotFoundError|no camera|Requested device not found/i.test(name)) {
+    advice = `No camera was found on this device.`;
+  } else if (/NotReadableError|TrackStartError|in use/i.test(name)) {
+    advice = `Another app is using the camera. Close it and try again.`;
+  } else if (/secure|https/i.test(name)) {
+    advice = `The camera only works over a secure (https) link.`;
+  } else {
+    advice = `The camera did not start.`;
+  }
+
+  setScanStatus(`<strong style="color:var(--red)">Camera trouble</strong>
+    <div class="muted" style="margin:6px 0 10px">${advice}</div>
+    <button class="btn sm" style="width:100%" onclick="showManualISBN()">Type the ISBN instead</button>
+    <div class="muted" style="margin-top:10px;font-size:11.5px">Technical detail: ${esc(String(name))}</div>`, 'bad');
+}
+
 async function startScan() {
   if (scanning) return;
   const box = $('#reader');
   if (!box) return;
-  box.hidden = false;
-  $('#scanIdle').hidden = true;
 
+  setScanStatus(`<div class="row"><span class="spinner" style="border-color:rgba(0,0,0,.15);border-top-color:var(--green)"></span>
+    <span class="muted">Starting the camera&hellip;</span></div>`);
+
+  // 1. Ask for the camera outright. iPhone needs this, and it gives a real error if refused.
   try {
-    scanner = new Html5Qrcode('reader', {
-      formatsToSupport: [
-        Html5QrcodeSupportedFormats.EAN_13,
-        Html5QrcodeSupportedFormats.EAN_8,
-        Html5QrcodeSupportedFormats.UPC_A,
-        Html5QrcodeSupportedFormats.UPC_E,
-        Html5QrcodeSupportedFormats.CODE_128,
-      ],
-      verbose: false,
-    });
-    await scanner.start(
-      { facingMode: 'environment' },
-      { fps: 10, qrbox: { width: 260, height: 150 }, aspectRatio: 1.4 },
-      onScanned,
-      () => {}
-    );
-    scanning = true;
-    $('#scanStop').hidden = false;
+    const probe = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } } });
+    probe.getTracks().forEach(t => t.stop());
   } catch (e) {
-    box.hidden = true;
-    $('#scanIdle').hidden = false;
-    toast('Camera unavailable — type the ISBN instead', 'bad');
+    return scanFailed(e);
   }
+
+  box.hidden = false;
+  const idle = $('#scanIdle'); if (idle) idle.hidden = true;
+
+  const config = { fps: 10, qrbox: { width: 260, height: 150 }, aspectRatio: 1.4 };
+  const formats = {
+    formatsToSupport: [
+      Html5QrcodeSupportedFormats.EAN_13,
+      Html5QrcodeSupportedFormats.EAN_8,
+      Html5QrcodeSupportedFormats.UPC_A,
+      Html5QrcodeSupportedFormats.UPC_E,
+      Html5QrcodeSupportedFormats.CODE_128,
+    ],
+    verbose: false,
+  };
+
+  // 2. Try the back camera by name, then by device id, then anything at all.
+  const attempts = [
+    () => scanner.start({ facingMode: 'environment' }, config, onScanned, () => {}),
+    async () => {
+      const cams = await Html5Qrcode.getCameras();
+      if (!cams || !cams.length) throw new Error('NotFoundError');
+      const back = cams.find(c => /back|rear|environment/i.test(c.label)) || cams[cams.length - 1];
+      return scanner.start(back.id, config, onScanned, () => {});
+    },
+    () => scanner.start({ facingMode: 'user' }, config, onScanned, () => {}),
+  ];
+
+  let lastErr;
+  for (const attempt of attempts) {
+    try {
+      scanner = new Html5Qrcode('reader', formats);
+      await attempt();
+      scanning = true;
+      const stop = $('#scanStop'); if (stop) stop.hidden = false;
+      setScanStatus(`<div class="muted">Point at the barcode on the back of the book. Hold steady &mdash; your phone buzzes when it reads.</div>
+        <button class="btn ghost sm" style="width:100%;margin-top:10px" onclick="showManualISBN()">Type the ISBN instead</button>`);
+      return;
+    } catch (e) {
+      lastErr = e;
+      try { scanner && scanner.clear(); } catch (x) {}
+      scanner = null;
+    }
+  }
+  scanFailed(lastErr);
 }
 
 async function stopScan() {
@@ -699,6 +772,7 @@ async function stopScan() {
   if (box) box.hidden = true;
   const idle = $('#scanIdle'); if (idle) idle.hidden = false;
   const stop = $('#scanStop'); if (stop) stop.hidden = true;
+  setScanStatus('');
 }
 
 function onScanned(text) {
@@ -1068,6 +1142,7 @@ function renderScan() {
       <button class="btn ghost" style="margin-top:10px" onclick="showManualISBN()">Type the ISBN instead</button>
     </div>
     <div id="reader" hidden></div>
+    <div id="scanStatus" class="card pad" hidden style="margin-top:12px"></div>
     <button class="btn ghost" id="scanStop" hidden style="margin-top:12px" onclick="stopScan()">Stop scanning</button>
 
     <div class="sect-title">Right now</div>
@@ -1279,7 +1354,7 @@ function renderSettings() {
       <div class="muted" style="margin-bottom:12px">Signed in as ${esc(state.user.email)}</div>
       <button class="btn ghost" onclick="signOut()">Sign out</button>
     </div>
-    <p class="muted center" style="margin-top:22px;font-size:12px">Class Scanner &middot; v1.3</p>
+    <p class="muted center" style="margin-top:22px;font-size:12px">Class Scanner &middot; v1.4</p>
   `;
 }
 
